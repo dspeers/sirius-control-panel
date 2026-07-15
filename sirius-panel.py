@@ -171,6 +171,11 @@ async function poll(){
     $('#chg').innerHTML=(d.current>0.05?'<span class="charging">↑ '+d.current.toFixed(2)+'A</span>':(d.current<-0.05?'<span class="discharging">↓ '+d.current.toFixed(2)+'A</span>':'flat'));
     $('#voltage').textContent=d.voltage.toFixed(2)+' V · '+(d.power_supply_status_string||'')+' · '+(d.power_supply_health_string||'');
     $('#conn').textContent='online';$('#conn').className='pill charging';
+    // The charger plugs into the tail => charging means it's tethered/on a leash.
+    // Keep it in desktop mode the whole time it's charging so it can't wander off
+    // and unplug itself. Only acts when the mode is actually wrong, so no 2s spam.
+    const charging=d.is_charging===true;
+    if(charging && robotMode!=='desktop'){ setMode('desktop'); toast('on charger → desktop mode (tethered)'); }
   }
   const t=await api('motor/temperature');
   if(t&&t.data){const d=t.data;const vals=[d.front_left,d.front_right,d.back_left,d.back_right].filter(x=>x!=null);
