@@ -238,15 +238,20 @@ api('action/list?limit=1000').then(r=>{
   $('#acount').textContent='('+ACTIONS.length+')';
   renderActions('');
 });
-// sleep = pause autonomous, lie into a sleep pose, camera off (low-power rest; NOT a real power-off)
+// sleep = pause autonomous + desktop-lock (so it can't wake itself and roam),
+// lie into a sleep pose, camera off. Low-power rest — NOT a real power-off.
 $('#sleepBtn').onclick=async()=>{ toast('going to sleep…');
-  await setAutonomous(false);
+  await setAutonomous(false);   // stop the emotion engine from triggering actions
+  await setMode('desktop');     // stay-put lock: no roaming even if nudged
   await api('action/play','POST',{file_path:BASE+'/stand_default_lie_sleep_soft_off_001_trans.avi',torque:+tq.value});
-  await setCam(false); };
-// wake = camera back on, stand up with a stretch
+  await setCam(false);
+  toast('asleep — won\'t wake on its own'); };
+// wake = camera on, stand up with a stretch, then restore roaming + autonomous
 $('#wakeBtn').onclick=async()=>{ toast('waking…');
   await setCam(true);
-  await api('action/play','POST',{file_path:BASE+'/lie_sleep_stand_default_stretch_trans.avi',torque:+tq.value}); };
+  await api('action/play','POST',{file_path:BASE+'/lie_sleep_stand_default_stretch_trans.avi',torque:+tq.value});
+  await setMode('ground');
+  await setAutonomous(true); };
 </script>
 </body></html>"""
 
