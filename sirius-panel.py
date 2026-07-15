@@ -167,15 +167,16 @@ $('#camBtn').onclick=()=>setCam(!camOn);
 async function poll(){
   const b=await api('battery/status');
   if(b&&b.data){const d=b.data;const pc=Math.round(d.percentage*100);
-    $('#pct').textContent=pc+'%';$('#batt').textContent='battery '+pc+(d.is_charging?' ⚡':'');
+    // NOTE: this robot's is_charging / power_supply_status are unreliable — they stay
+    // "CHARGING" even when unplugged. Trust the CURRENT sign: >0 = actually taking charge.
+    const charging=d.current>0.1;
+    $('#pct').textContent=pc+'%';$('#batt').textContent='battery '+pc+(charging?' ⚡':'');
     $('#chg').innerHTML=(d.current>0.05?'<span class="charging">↑ '+d.current.toFixed(2)+'A</span>':(d.current<-0.05?'<span class="discharging">↓ '+d.current.toFixed(2)+'A</span>':'flat'));
     $('#voltage').textContent=d.voltage.toFixed(2)+' V · '+(d.power_supply_status_string||'')+' · '+(d.power_supply_health_string||'');
     $('#conn').textContent='online';$('#conn').className='pill charging';
-    // The charger plugs into the tail => charging means it's tethered/on a leash.
-    // Keep it in desktop mode the whole time it's charging so it can't wander off
-    // and unplug itself. Only acts when the mode is actually wrong, so no 2s spam.
-    const charging=d.is_charging===true;
-    if(charging && robotMode!=='desktop'){ setMode('desktop'); toast('on charger → desktop mode (tethered)'); }
+    // Charger plugs into the tail => actually-charging means it's tethered/on a leash.
+    // Keep it in desktop mode while charging so it can't wander off and unplug itself.
+    if(charging && robotMode!=='desktop'){ setMode('desktop'); toast('charging → desktop mode (tethered)'); }
   }
   const t=await api('motor/temperature');
   if(t&&t.data){const d=t.data;const vals=[d.front_left,d.front_right,d.back_left,d.back_right].filter(x=>x!=null);
