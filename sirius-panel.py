@@ -6,7 +6,7 @@ Serves a self-contained control UI at http://localhost:8777 and proxies
   /stream  -> http://<ROBOT>:8080/video_stream (MJPEG)
 so the browser only ever talks to localhost => no CORS, no mixed-content.
 """
-import sys, json, urllib.request, urllib.error
+import sys, json, threading, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROBOT = sys.argv[1] if len(sys.argv) > 1 else "192.168.4.134"
@@ -137,14 +137,19 @@ async function api(path,method='GET',body){
     return j;
   }catch(e){toast('unreachable: '+path,true);$('#conn').textContent='offline';$('#conn').className='pill discharging';return null;}
 }
-// camera — the MJPEG stream only emits frames when vision detection is on
-let camOn=true;
-async function setCam(on){camOn=on;
+// camera — the MJPEG stream only emits frames when vision detection is on.
+// Reconnect with exponential backoff so a downed camera can't be hammered
+// (each reconnect opens a stream on the robot; tight-looping leaks connections).
+let camOn=true, camRetry=0, camTimer=null;
+function camConnect(){ if(!camOn)return; camTimer=null; $('#cam').src='/stream?'+Date.now(); }
+async function setCam(on){camOn=on; camRetry=0; if(camTimer){clearTimeout(camTimer);camTimer=null;}
   $('#camBtn').textContent=on?'on':'off';$('#camBtn').style.color=on?'var(--ok)':'var(--mut)';
-  await api('vision/detection','POST',{enabled:on});
-  $('#cam').src=on?'/stream?'+Date.now():'';
-  if(!on)$('#cam').removeAttribute('src');}
-$('#cam').onerror=()=>{if(camOn)setTimeout(()=>$('#cam').src='/stream?'+Date.now(),1500);};
+  try{await api('vision/detection','POST',{enabled:on});}catch(e){}
+  if(on)camConnect(); else {$('#cam').removeAttribute('src'); $('#cam').style.opacity=.4;}}
+$('#cam').onload=()=>{camRetry=0; $('#cam').style.opacity=1;};   // frames flowing → reset backoff
+$('#cam').onerror=()=>{ if(!camOn||camTimer)return; camRetry++;
+  const delay=Math.min(30000, 1000*Math.pow(2,Math.min(camRetry,5)));  // 2s,4s,8s,16s,32s→cap 30s
+  camTimer=setTimeout(camConnect, delay); };
 setCam(true);
 $('#camBtn').onclick=()=>setCam(!camOn);
 // status poll
@@ -224,6 +229,11 @@ api('action/list?limit=1000').then(r=>{
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # Cap concurrent MJPEG upstreams to the robot — its camera server has a
+    # limited client budget and leaked connections can crash the camera node.
+    _stream_lock = threading.Lock()
+    _stream_count = 0
+    MAX_STREAMS = 2
     def log_message(self, *a): pass
 
     def _serve_html(self):
@@ -235,25 +245,34 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def _proxy_stream(self):
+        with H._stream_lock:
+            if H._stream_count >= H.MAX_STREAMS:
+                self.send_error(503, "too many camera streams"); return
+            H._stream_count += 1
+        up = None
         try:
-            up = urllib.request.urlopen(CAM, timeout=10)
-        except Exception as e:
-            self.send_error(502, f"camera: {e}"); return
-        ct = up.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=--jpgboundary")
-        self.send_response(200)
-        self.send_header("Content-Type", ct)
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        try:
-            while True:
-                chunk = up.read(8192)
-                if not chunk: break
-                self.wfile.write(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+            try:
+                up = urllib.request.urlopen(CAM, timeout=10)
+            except Exception as e:
+                self.send_error(502, f"camera: {e}"); return
+            ct = up.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=--jpgboundary")
+            self.send_response(200)
+            self.send_header("Content-Type", ct)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            try:
+                while True:
+                    chunk = up.read(8192)
+                    if not chunk: break
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
         finally:
-            try: up.close()
-            except Exception: pass
+            if up is not None:
+                try: up.close()
+                except Exception: pass
+            with H._stream_lock:
+                H._stream_count -= 1
 
     def _proxy_api(self, method):
         length = int(self.headers.get("Content-Length", 0) or 0)
