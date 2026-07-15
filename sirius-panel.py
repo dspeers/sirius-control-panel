@@ -100,6 +100,11 @@ HTML = r"""<!doctype html>
         <button data-mode="precision">precision</button>
         <button data-mode="climb">climb</button>
       </div></div>
+      <div class="row"><label>Rest</label><div class="seg">
+        <button id="sleepBtn">😴 sleep</button>
+        <button id="wakeBtn">🧍 wake</button>
+        <span class="muted" style="align-self:center">(full power-off = physical button)</span>
+      </div></div>
     </div>
   </div>
   <div class="col">
@@ -233,6 +238,15 @@ api('action/list?limit=1000').then(r=>{
   $('#acount').textContent='('+ACTIONS.length+')';
   renderActions('');
 });
+// sleep = pause autonomous, lie into a sleep pose, camera off (low-power rest; NOT a real power-off)
+$('#sleepBtn').onclick=async()=>{ toast('going to sleep…');
+  await setAutonomous(false);
+  await api('action/play','POST',{file_path:BASE+'/stand_default_lie_sleep_soft_off_001_trans.avi',torque:+tq.value});
+  await setCam(false); };
+// wake = camera back on, stand up with a stretch
+$('#wakeBtn').onclick=async()=>{ toast('waking…');
+  await setCam(true);
+  await api('action/play','POST',{file_path:BASE+'/lie_sleep_stand_default_stretch_trans.avi',torque:+tq.value}); };
 </script>
 </body></html>"""
 
