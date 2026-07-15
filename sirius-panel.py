@@ -105,6 +105,11 @@ HTML = r"""<!doctype html>
         <button id="wakeBtn">🧍 wake</button>
         <span class="muted" style="align-self:center">(full power-off = physical button)</span>
       </div></div>
+      <div class="row"><label>Recover</label><div class="seg">
+        <button id="recLeft">⤾ tipped left</button>
+        <button id="recRight">tipped right ⤿</button>
+        <span class="muted" style="align-self:center">(for side tips, not fully upside-down)</span>
+      </div></div>
     </div>
   </div>
   <div class="col">
@@ -262,6 +267,11 @@ $('#wakeBtn').onclick=async()=>{ toast('waking…');
   await playWait('lie_sleep_stand_default_stretch_trans.avi');
   await setMode('ground');
   await setAutonomous(true); };
+// recover from a side tip — pause autonomous so it doesn't fight, full torque to push up
+$('#recLeft').onclick=()=>{ ensureManual();
+  api('action/play','POST',{file_path:BASE+'/RecoveryFromLeftSideTipping.avi',torque:2047}); toast('recovering from left tip…'); };
+$('#recRight').onclick=()=>{ ensureManual();
+  api('action/play','POST',{file_path:BASE+'/RecoveryFromRightSideTipping.avi',torque:2047}); toast('recovering from right tip…'); };
 </script>
 </body></html>"""
 
