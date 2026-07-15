@@ -278,14 +278,15 @@ $('#sleepBtn').onclick=async()=>{ toast('going to sleep…');
   await setMode('desktop');     // stay-put lock: no roaming even if nudged
   await playWait('stand_default_returnPosition_brief.avi');        // reach a stable stand first
   await playWait('stand_default_lie_sleep_soft_off_001_trans.avi');// then transition down safely
-  // loop the sleep-idle so it actively HOLDS the pose — otherwise the position
-  // controller drifts back to standing once no action is playing.
-  await api('action/play','POST',{file_path:BASE+'/lie_sleep_idle.avi',torque:+tq.value,loop:true});
+  // relax the motors so they go slack and COOL while resting on the ground. Low
+  // torque also can't stand it up, so it stays down (no drift back to standing) —
+  // without any active pose-holding.
+  await api('motor/torque','POST',{torque:200});
   await setCam(false);
-  toast('asleep — won\'t wake on its own'); };
-// wake = stop the sleep-idle loop, camera on, stand up with a stretch, restore roaming + autonomous
+  toast('asleep — motors relaxed'); };
+// wake = restore torque so it can stand, camera on, stand up with a stretch, restore roaming + autonomous
 $('#wakeBtn').onclick=async()=>{ toast('waking…');
-  await api('action/stop','POST',{});
+  await api('motor/torque','POST',{torque:2047});
   await setCam(true);
   await playWait('lie_sleep_stand_default_stretch_trans.avi');
   await setMode('ground');
