@@ -63,6 +63,7 @@ HTML = r"""<!doctype html>
   <span class="pill" id="fw">robot —</span>
   <span class="pill" id="batt">battery —</span>
   <span class="pill" id="conn">…</span>
+  <span class="pill" id="pose">pose —</span>
   <button id="autoBtn" class="pill" style="cursor:pointer;border-color:var(--ok)">🤖 autonomous: on</button>
   <button id="modeBtn" class="pill" style="cursor:pointer">🖥️ desktop</button>
 </header>
@@ -181,6 +182,18 @@ async function poll(){
   const t=await api('motor/temperature');
   if(t&&t.data){const d=t.data;const vals=[d.front_left,d.front_right,d.back_left,d.back_right].filter(x=>x!=null);
     if(vals.length)$('#temp').textContent=Math.max(...vals)+'°';}
+  // current pose/stance: sleep action => asleep, else derive from body height (tran_z)
+  const tr=await api('transform/status'); const ac=await api('action/status');
+  $('#pose').textContent='pose: '+poseLabel(tr&&tr.data, ac&&ac.data);
+}
+function poseLabel(tr,ac){
+  const f=(ac&&ac.file_path)?ac.file_path.split('/').pop():'';
+  if(/lie_sleep/.test(f)) return 'asleep';
+  const z=(tr&&tr.body)?tr.body.tran_z:null;
+  if(z==null) return '—';
+  if(z>100) return 'standing';
+  if(z<60) return 'lying';
+  return 'sitting';
 }
 poll();setInterval(poll,2000);
 // autonomous vs manual control
@@ -265,10 +278,14 @@ $('#sleepBtn').onclick=async()=>{ toast('going to sleep…');
   await setMode('desktop');     // stay-put lock: no roaming even if nudged
   await playWait('stand_default_returnPosition_brief.avi');        // reach a stable stand first
   await playWait('stand_default_lie_sleep_soft_off_001_trans.avi');// then transition down safely
+  // loop the sleep-idle so it actively HOLDS the pose — otherwise the position
+  // controller drifts back to standing once no action is playing.
+  await api('action/play','POST',{file_path:BASE+'/lie_sleep_idle.avi',torque:+tq.value,loop:true});
   await setCam(false);
   toast('asleep — won\'t wake on its own'); };
-// wake = camera on, stand up with a stretch, then restore roaming + autonomous
+// wake = stop the sleep-idle loop, camera on, stand up with a stretch, restore roaming + autonomous
 $('#wakeBtn').onclick=async()=>{ toast('waking…');
+  await api('action/stop','POST',{});
   await setCam(true);
   await playWait('lie_sleep_stand_default_stretch_trans.avi');
   await setMode('ground');
