@@ -64,6 +64,7 @@ HTML = r"""<!doctype html>
   <span class="pill" id="batt">battery —</span>
   <span class="pill" id="conn">…</span>
   <button id="autoBtn" class="pill" style="cursor:pointer;border-color:var(--ok)">🤖 autonomous: on</button>
+  <button id="modeBtn" class="pill" style="cursor:pointer">🖥️ desktop</button>
 </header>
 <div class="wrap">
   <div class="col">
@@ -174,6 +175,14 @@ async function setAutonomous(on){autonomous=on;
   toast(on?'autonomous mode on':'manual control — autonomous paused');}
 function ensureManual(){if(autonomous)setAutonomous(false);}
 $('#autoBtn').onclick=()=>setAutonomous(!autonomous);
+// robot mode: ground = free to walk/explore; desktop = stays put (tabletop-safe)
+let robotMode='desktop';
+function paintMode(){const b=$('#modeBtn');const ground=robotMode==='ground';
+  b.textContent=ground?'🧭 ground (roam)':'🖥️ desktop (stay)';b.style.borderColor=ground?'var(--acc)':'var(--line)';b.style.color=ground?'var(--acc)':'';}
+async function setMode(m){robotMode=m;paintMode();await api('user/robot-mode','POST',{robot_mode:m});
+  toast(m==='ground'?'ground mode — free to roam (keep it off tables!)':'desktop mode — stays put');}
+api('user/robot-mode').then(r=>{if(r&&r.data&&r.data.robot_mode){robotMode=r.data.robot_mode;paintMode();}});
+$('#modeBtn').onclick=()=>setMode(robotMode==='ground'?'desktop':'ground');
 // firmware
 api('ota/check').then(r=>{if(r&&r.data)$('#fw').textContent='v'+r.data.current_version;});
 // speed + hold-to-move
