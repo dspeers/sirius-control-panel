@@ -211,7 +211,9 @@ async function poll(){
   }
   const t=await api('motor/temperature');
   if(t&&t.data){const d=t.data;const vals=[d.front_left,d.front_right,d.back_left,d.back_right].filter(x=>x!=null);
-    if(vals.length)$('#temp').textContent=Math.max(...vals)+'°';}
+    const mx=vals.length?Math.max(...vals):0;
+    // firmware reports all-zero when motor telemetry isn't populated (idle/relaxed) — show "—", not a fake 0°
+    $('#temp').textContent = mx>0 ? mx+'°' : '—';}
   // current pose/stance: sleep action => asleep, else derive from body height (tran_z)
   const tr=await api('transform/status'); const ac=await api('action/status');
   $('#pose').textContent='pose: '+poseLabel(tr&&tr.data, ac&&ac.data);
