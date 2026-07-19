@@ -21,6 +21,9 @@ mixed-content blocking** — the usual pain of pointing an `https://` page at an
 - 🔋 **Live status** — battery %, charge current, charging state, and motor temperatures
 - 🤖 **Manual / Autonomous toggle** — pauses the robot's autonomous behavior so your commands aren't
   overridden. Also drops into manual automatically the moment you drive, play an action, or move a pose slider.
+- 🗣️ **Voice control** — start/stop the local **"Hey Jarvis"** brain and watch a live feed of what the speech
+  system hears (wake → transcript → command). Includes a **readiness panel** (per-component green/red lights)
+  and a **one-click setup** that provisions everything on a new machine. See [Voice control](#voice-control-local-brain).
 
 ## Requirements
 
@@ -44,6 +47,29 @@ Then open **http://localhost:8777** in your browser.
 
 Find your robot's IP from the Sirius face-screen menu (swipe to open it and look for the IP), or from your
 router's client list.
+
+## Voice control (local brain)
+
+The panel can supervise and monitor a fully local, no-cloud voice system —
+[**sirius-voice-bridge**](https://github.com/dspeers/sirius-voice-bridge) (mic → wake word → Whisper →
+robot action, with a local Qwen fallback). The **Voice** card lets you:
+
+- **Start / Stop** the brain (the panel runs it as a child process) and see its status.
+- **Watch a live feed** of wake words, transcripts, and matched commands as you speak.
+- **Readiness lights** for each sub-component: Homebrew, Ollama, the Qwen model, the Python deps, Whisper,
+  the wake model, the microphone, and the robot.
+- **Set up / install** — one click provisions everything (Ollama, the model, the venv + deps), streaming the
+  progress. It does **not** install Homebrew — that one prerequisite you install yourself (see below).
+
+The panel itself stays dependency-free; the voice system's heavier dependencies live in its own repo/venv.
+
+**Prerequisite:** [Homebrew](https://brew.sh). One time:
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+Then clone `sirius-voice-bridge` next to this repo (or point the panel at it with the `VOICE_DIR` env var),
+open the panel, and use the Voice card's **set up / install** button. Full details + prereqs are in the
+[sirius-voice-bridge README](https://github.com/dspeers/sirius-voice-bridge#prerequisites-macos).
 
 ## How it works
 
