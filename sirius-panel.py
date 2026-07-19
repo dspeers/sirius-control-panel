@@ -155,8 +155,11 @@ HTML = r"""<!doctype html>
     <div class="card" style="margin-top:16px">
       <h2>Voice — &ldquo;Hey Jarvis&rdquo; <button id="voiceBtn" class="pill" style="cursor:pointer;float:right">off</button></h2>
       <div class="muted" id="vinfo">local brain stopped</div>
-      <div style="margin-top:8px;font-size:12px">Readiness <a id="vrecheck" style="color:var(--acc);cursor:pointer;margin-left:6px">recheck</a>
+      <div style="margin-top:8px;font-size:12px">Readiness
+        <a id="vrecheck" style="color:var(--acc);cursor:pointer;margin-left:6px">recheck</a>
+        <a id="vsetup" style="color:var(--acc);cursor:pointer;margin-left:12px">set up / install</a>
         <div id="vhealth" style="margin-top:6px"><span class="muted">checking…</span></div></div>
+      <pre id="vsetuplog" style="display:none;margin-top:8px;max-height:150px;overflow:auto;background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:8px;font:11px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap"></pre>
       <div id="vfeed" style="margin-top:10px;height:170px;overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px;font:12px/1.55 ui-monospace,Menlo,monospace"></div>
     </div>
   </div>
@@ -342,6 +345,13 @@ function renderHealth(h){$('#vhealth').innerHTML=HK.map(([k,lbl])=>{const ok=!!h
   return '<span style="display:inline-flex;align-items:center;gap:5px;margin:2px 12px 2px 0;white-space:nowrap"><span style="width:9px;height:9px;border-radius:50%;background:'+(ok?'var(--ok)':'var(--bad)')+'"></span>'+lbl+'</span>';}).join('');}
 function checkHealth(){$('#vhealth').innerHTML='<span class="muted">checking…</span>';fetch('/voice/health').then(r=>r.json()).then(renderHealth).catch(()=>{$('#vhealth').innerHTML='<span class="muted">check failed</span>';});}
 $('#vrecheck').onclick=checkHealth; checkHealth();
+async function runSetup(){const btn=$('#vsetup'),out=$('#vsetuplog');
+  btn.style.pointerEvents='none';btn.textContent='setting up…';out.style.display='block';out.textContent='';
+  try{const resp=await fetch('/voice/setup',{method:'POST'});const rd=resp.body.getReader(),dec=new TextDecoder();
+    for(;;){const {value,done}=await rd.read();if(done)break;out.textContent+=dec.decode(value);out.scrollTop=out.scrollHeight;}
+  }catch(e){out.textContent+='\n[error] '+e;}
+  btn.style.pointerEvents='';btn.textContent='set up / install';checkHealth();}
+$('#vsetup').onclick=runSetup;
 function vline(msg,color){const d=document.createElement('div');const t=new Date().toTimeString().slice(0,8);
   d.innerHTML='<span style="color:var(--mut)">'+t+'</span> '+msg;if(color)d.style.color=color;
   vfeed.appendChild(d);vfeed.scrollTop=vfeed.scrollHeight;while(vfeed.children.length>200)vfeed.removeChild(vfeed.firstChild);}
@@ -531,6 +541,31 @@ class H(BaseHTTPRequestHandler):
                 try: f.close()
                 except Exception: pass
 
+    def _voice_setup(self):
+        # run setup.sh and stream its output as the response body (the UI reads it with a fetch reader).
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        script = os.path.join(VOICE_DIR, "setup.sh")
+        if not os.path.exists(script):
+            try: self.wfile.write(b"ERROR: setup.sh not found in VOICE_DIR\n")
+            except Exception: pass
+            return
+        proc = None
+        try:
+            proc = subprocess.Popen(["bash", script], cwd=VOICE_DIR,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in proc.stdout:
+                try: self.wfile.write(line.encode()); self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError): proc.terminate(); return
+            proc.wait()
+            self.wfile.write(f"\n[exit {proc.returncode}]\n".encode()); self.wfile.flush()
+        except Exception as e:
+            try: self.wfile.write(f"ERROR: {e}\n".encode())
+            except Exception: pass
+            if proc: proc.terminate()
+
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/index"):
             self._serve_html()
@@ -554,6 +589,8 @@ class H(BaseHTTPRequestHandler):
             self._voice_start()
         elif self.path == "/voice/stop":
             self._voice_stop()
+        elif self.path == "/voice/setup":
+            self._voice_setup()
         else:
             self.send_error(404)
 
