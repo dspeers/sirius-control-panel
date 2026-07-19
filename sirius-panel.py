@@ -6,7 +6,7 @@ Serves a self-contained control UI at http://localhost:8777 and proxies
   /stream  -> http://<ROBOT>:8080/video_stream (MJPEG)
 so the browser only ever talks to localhost => no CORS, no mixed-content.
 """
-import sys, json, os, time, threading, subprocess, urllib.request, urllib.error
+import sys, json, os, time, shutil, threading, subprocess, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROBOT = sys.argv[1] if len(sys.argv) > 1 else "192.168.4.134"
@@ -20,6 +20,19 @@ VOICE_PY = os.path.join(VOICE_DIR, ".venv", "bin", "python")
 VOICE_EVENTS = os.path.join(VOICE_DIR, "voice_direct.events.jsonl")
 _voice = {"proc": None}
 _voice_lock = threading.Lock()
+
+# One venv-side probe for the deps/mic/models readiness (cheaper than 4 python startups).
+PROBE = (
+    "import json,os,glob\nr={}\n"
+    "try:\n import sounddevice,openwakeword,faster_whisper,webrtcvad,onnxruntime,numpy\n r['deps']=True\n"
+    "except Exception:\n r['deps']=False\n"
+    "try:\n import sounddevice as sd; sd.query_devices(kind='input'); r['mic']=True\n"
+    "except Exception:\n r['mic']=False\n"
+    "try:\n import openwakeword as o; r['wake']=os.path.exists(os.path.join(o.__path__[0],'resources','models','hey_jarvis_v0.1.onnx'))\n"
+    "except Exception:\n r['wake']=False\n"
+    "r['whisper']=bool(glob.glob(os.path.expanduser('~/.cache/huggingface/hub/*faster-whisper-small*')))\n"
+    "print(json.dumps(r))\n"
+)
 
 HTML = r"""<!doctype html>
 <html lang="en"><head>
@@ -142,7 +155,9 @@ HTML = r"""<!doctype html>
     <div class="card" style="margin-top:16px">
       <h2>Voice — &ldquo;Hey Jarvis&rdquo; <button id="voiceBtn" class="pill" style="cursor:pointer;float:right">off</button></h2>
       <div class="muted" id="vinfo">local brain stopped</div>
-      <div id="vfeed" style="margin-top:10px;height:180px;overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px;font:12px/1.55 ui-monospace,Menlo,monospace"></div>
+      <div style="margin-top:8px;font-size:12px">Readiness <a id="vrecheck" style="color:var(--acc);cursor:pointer;margin-left:6px">recheck</a>
+        <div id="vhealth" style="margin-top:6px"><span class="muted">checking…</span></div></div>
+      <div id="vfeed" style="margin-top:10px;height:170px;overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px;font:12px/1.55 ui-monospace,Menlo,monospace"></div>
     </div>
   </div>
 </div>
@@ -322,6 +337,11 @@ async function toggleVoice(){
 voiceBtn.onclick=toggleVoice;
 function pollVoice(){fetch('/voice/status').then(r=>r.json()).then(r=>{voiceRunning=!!r.running;paintVoice();if(!voiceRunning)vinfo.textContent='local brain stopped';}).catch(()=>{});}
 pollVoice(); setInterval(pollVoice,3000);
+const HK=[['homebrew','Homebrew'],['ollama_running','Ollama'],['model','Qwen model'],['deps','Python deps'],['whisper','Whisper'],['wake','Wake word'],['mic','Microphone'],['robot','Robot']];
+function renderHealth(h){$('#vhealth').innerHTML=HK.map(([k,lbl])=>{const ok=!!h[k];
+  return '<span style="display:inline-flex;align-items:center;gap:5px;margin:2px 12px 2px 0;white-space:nowrap"><span style="width:9px;height:9px;border-radius:50%;background:'+(ok?'var(--ok)':'var(--bad)')+'"></span>'+lbl+'</span>';}).join('');}
+function checkHealth(){$('#vhealth').innerHTML='<span class="muted">checking…</span>';fetch('/voice/health').then(r=>r.json()).then(renderHealth).catch(()=>{$('#vhealth').innerHTML='<span class="muted">check failed</span>';});}
+$('#vrecheck').onclick=checkHealth; checkHealth();
 function vline(msg,color){const d=document.createElement('div');const t=new Date().toTimeString().slice(0,8);
   d.innerHTML='<span style="color:var(--mut)">'+t+'</span> '+msg;if(color)d.style.color=color;
   vfeed.appendChild(d);vfeed.scrollTop=vfeed.scrollHeight;while(vfeed.children.length>200)vfeed.removeChild(vfeed.firstChild);}
@@ -448,6 +468,37 @@ class H(BaseHTTPRequestHandler):
         running = bool(p and p.poll() is None)
         return self._send_json({"running": running, "pid": p.pid if running else None})
 
+    def _voice_health(self):
+        # ready/not-ready per sub-component, for the UI's readiness lights.
+        h = {"homebrew": bool(shutil.which("brew")),
+             "ollama": bool(shutil.which("ollama")),
+             "venv": os.path.exists(VOICE_PY)}
+        tags = None
+        try:
+            with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as r:
+                tags = json.loads(r.read().decode())
+        except Exception:
+            tags = None
+        h["ollama_running"] = tags is not None
+        h["model"] = bool(tags and any("qwen2.5" in m.get("name", "") for m in tags.get("models", [])))
+        try:
+            with urllib.request.urlopen(f"{API}/api/v1/action/list?limit=1", timeout=3) as r:
+                h["robot"] = r.status == 200
+        except Exception:
+            h["robot"] = False
+        probe = {}
+        if h["venv"]:
+            try:
+                out = subprocess.run([VOICE_PY, "-c", PROBE], capture_output=True, text=True, timeout=40)
+                probe = json.loads((out.stdout or "").strip() or "{}")
+            except Exception:
+                probe = {}
+        for k in ("deps", "mic", "wake", "whisper"):
+            h[k] = bool(probe.get(k))
+        p = _voice["proc"]
+        h["voice_running"] = bool(p and p.poll() is None)
+        return self._send_json(h)
+
     def _voice_events(self):
         # SSE: replay the last events for context, then follow the JSONL (tail -f). Mirrors _proxy_stream:
         # HTTP/1.1 keep-alive stream with no Content-Length; the browser reads events as they arrive.
@@ -489,6 +540,8 @@ class H(BaseHTTPRequestHandler):
             self._proxy_api("GET")
         elif self.path == "/voice/status":
             self._voice_status()
+        elif self.path == "/voice/health":
+            self._voice_health()
         elif self.path == "/voice/events":
             self._voice_events()
         else:
