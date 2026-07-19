@@ -6,13 +6,20 @@ Serves a self-contained control UI at http://localhost:8777 and proxies
   /stream  -> http://<ROBOT>:8080/video_stream (MJPEG)
 so the browser only ever talks to localhost => no CORS, no mixed-content.
 """
-import sys, json, threading, urllib.request, urllib.error
+import sys, json, os, time, threading, subprocess, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROBOT = sys.argv[1] if len(sys.argv) > 1 else "192.168.4.134"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8777
 API = f"http://{ROBOT}:8088"
 CAM = f"http://{ROBOT}:8080/video_stream"
+
+# Voice control (the local brain) — supervised as a child process; its JSONL events feed the UI monitor.
+VOICE_DIR = os.environ.get("VOICE_DIR", os.path.expanduser("~/sirius-voice-bridge"))
+VOICE_PY = os.path.join(VOICE_DIR, ".venv", "bin", "python")
+VOICE_EVENTS = os.path.join(VOICE_DIR, "voice_direct.events.jsonl")
+_voice = {"proc": None}
+_voice_lock = threading.Lock()
 
 HTML = r"""<!doctype html>
 <html lang="en"><head>
@@ -131,6 +138,11 @@ HTML = r"""<!doctype html>
       </div>
       <div class="row"><label>Torque</label><input type="range" id="torque" min="200" max="2047" step="1" value="1500"><span class="val" id="torquev">1500</span></div>
       <div class="alist" id="alist"><div class="muted">loading actions…</div></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>Voice — &ldquo;Hey Jarvis&rdquo; <button id="voiceBtn" class="pill" style="cursor:pointer;float:right">off</button></h2>
+      <div class="muted" id="vinfo">local brain stopped</div>
+      <div id="vfeed" style="margin-top:10px;height:180px;overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px;font:12px/1.55 ui-monospace,Menlo,monospace"></div>
     </div>
   </div>
 </div>
@@ -296,6 +308,36 @@ $('#recLeft').onclick=()=>{ ensureManual();
   api('action/play','POST',{file_path:BASE+'/RecoveryFromLeftSideTipping.avi',torque:2047}); toast('recovering from left tip…'); };
 $('#recRight').onclick=()=>{ ensureManual();
   api('action/play','POST',{file_path:BASE+'/RecoveryFromRightSideTipping.avi',torque:2047}); toast('recovering from right tip…'); };
+
+// ---- Voice (local brain): supervise + live monitor ----
+let voiceRunning=false;
+const vfeed=$('#vfeed'), voiceBtn=$('#voiceBtn'), vinfo=$('#vinfo');
+function paintVoice(){voiceBtn.textContent=voiceRunning?'on':'off';voiceBtn.style.color=voiceRunning?'var(--ok)':'var(--mut)';}
+async function toggleVoice(){
+  voiceBtn.disabled=true;
+  const r=await fetch('/voice/'+(voiceRunning?'stop':'start'),{method:'POST'}).then(r=>r.json()).catch(()=>({}));
+  voiceRunning=!!r.running; paintVoice(); voiceBtn.disabled=false;
+  if(r.error){vinfo.textContent=r.error;} else if(voiceRunning){vinfo.textContent='starting… loading models';} else {vinfo.textContent='local brain stopped';}
+}
+voiceBtn.onclick=toggleVoice;
+function pollVoice(){fetch('/voice/status').then(r=>r.json()).then(r=>{voiceRunning=!!r.running;paintVoice();if(!voiceRunning)vinfo.textContent='local brain stopped';}).catch(()=>{});}
+pollVoice(); setInterval(pollVoice,3000);
+function vline(msg,color){const d=document.createElement('div');const t=new Date().toTimeString().slice(0,8);
+  d.innerHTML='<span style="color:var(--mut)">'+t+'</span> '+msg;if(color)d.style.color=color;
+  vfeed.appendChild(d);vfeed.scrollTop=vfeed.scrollHeight;while(vfeed.children.length>200)vfeed.removeChild(vfeed.firstChild);}
+const VC={ready:'var(--acc)',wake:'var(--acc)',heard:'var(--mut)',command:'var(--ok)',no_command:'var(--warn)',ignored:'var(--warn)'};
+function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+new EventSource('/voice/events').onmessage=e=>{let ev;try{ev=JSON.parse(e.data);}catch(_){return;}
+  let msg;
+  if(ev.kind==='ready'){vinfo.textContent='listening · whisper:'+ev.whisper+' · mic:'+ev.mic+' · llm:'+(ev.llm?'on':'off');msg='▶ listening — say &ldquo;Hey Jarvis, …&rdquo;';}
+  else if(ev.kind==='wake')msg='● wake';
+  else if(ev.kind==='heard')msg='&ldquo;'+esc(ev.text)+'&rdquo;';
+  else if(ev.kind==='command')msg='→ '+esc((ev.commands||[]).join(', '))+' <span style="color:var(--mut)">('+ev.via+')</span>';
+  else if(ev.kind==='no_command')msg='× not a command';
+  else if(ev.kind==='ignored')msg='× ignored (too long)';
+  else msg=esc(ev.kind);
+  vline(msg, VC[ev.kind]||'');
+};
 </script>
 </body></html>"""
 
@@ -368,6 +410,76 @@ class H(BaseHTTPRequestHandler):
         try: self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError): pass
 
+    def _send_json(self, obj, code=200):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        try: self.wfile.write(b)
+        except (BrokenPipeError, ConnectionResetError): pass
+
+    def _voice_start(self):
+        with _voice_lock:
+            p = _voice["proc"]
+            if p and p.poll() is None:
+                return self._send_json({"running": True, "pid": p.pid})
+            if not os.path.exists(VOICE_PY):
+                return self._send_json({"running": False, "error": "voice not set up (no venv)"}, 409)
+            env = dict(os.environ, ROBOT=f"{ROBOT}:8088")
+            try:
+                out = open(os.path.join(VOICE_DIR, "voice_direct.out.log"), "a")
+                _voice["proc"] = subprocess.Popen([VOICE_PY, "voice_direct.py"], cwd=VOICE_DIR,
+                    env=env, stdout=out, stderr=out)
+            except Exception as e:
+                return self._send_json({"running": False, "error": str(e)}, 500)
+            return self._send_json({"running": True, "pid": _voice["proc"].pid})
+
+    def _voice_stop(self):
+        with _voice_lock:
+            p = _voice["proc"]
+            if p and p.poll() is None:
+                p.terminate()
+            _voice["proc"] = None
+        return self._send_json({"running": False})
+
+    def _voice_status(self):
+        p = _voice["proc"]
+        running = bool(p and p.poll() is None)
+        return self._send_json({"running": running, "pid": p.pid if running else None})
+
+    def _voice_events(self):
+        # SSE: replay the last events for context, then follow the JSONL (tail -f). Mirrors _proxy_stream:
+        # HTTP/1.1 keep-alive stream with no Content-Length; the browser reads events as they arrive.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        f = None
+        try:
+            while True:
+                if f is None:
+                    if os.path.exists(VOICE_EVENTS):
+                        f = open(VOICE_EVENTS)
+                        for ln in f.readlines()[-40:]:          # replay recent context on connect
+                            if ln.strip():
+                                self.wfile.write(f"data: {ln.strip()}\n\n".encode())
+                        self.wfile.flush()
+                    else:
+                        time.sleep(1); continue
+                ln = f.readline()
+                if ln:
+                    if ln.strip():
+                        self.wfile.write(f"data: {ln.strip()}\n\n".encode()); self.wfile.flush()
+                else:
+                    self.wfile.write(b": ping\n\n"); self.wfile.flush(); time.sleep(1)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            if f:
+                try: f.close()
+                except Exception: pass
+
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/index"):
             self._serve_html()
@@ -375,12 +487,20 @@ class H(BaseHTTPRequestHandler):
             self._proxy_stream()
         elif self.path.startswith("/api/"):
             self._proxy_api("GET")
+        elif self.path == "/voice/status":
+            self._voice_status()
+        elif self.path == "/voice/events":
+            self._voice_events()
         else:
             self.send_error(404)
 
     def do_POST(self):
         if self.path.startswith("/api/"):
             self._proxy_api("POST")
+        elif self.path == "/voice/start":
+            self._voice_start()
+        elif self.path == "/voice/stop":
+            self._voice_stop()
         else:
             self.send_error(404)
 
